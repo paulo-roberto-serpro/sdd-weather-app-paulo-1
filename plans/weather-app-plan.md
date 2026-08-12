@@ -238,6 +238,16 @@ próprios no hook, sem ampliar o contrato do painel meteorológico.
 
 ## Data Flow
 
+```mermaid
+flowchart LR
+  Search[Busca do usuário] --> Geocoding[Geocoding Service]
+  Geocoding --> Hook[Hook / Estado]
+  Hook --> Forecast[Forecast Service]
+  Forecast --> Hook
+  Hook --> UI[UI]
+  UI -->|seleciona localidade ou atualiza| Hook
+```
+
 ### 1. Busca por localidade
 - O usuário digita no campo de busca
 - A entrada é normalizada: trim + compressão de espaços internos
