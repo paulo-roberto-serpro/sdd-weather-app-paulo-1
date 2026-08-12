@@ -20,11 +20,32 @@ flowchart LR
 ```
 
 ### Camadas principais
-- UI: componentes de busca, favoritos, previsão, unidades, estados e acessibilidade
-- Domain model: tipos para Localidade, Current Weather, Daily Forecast, Preferences e Favorites
-- Services: geocoding, forecast, geolocation, cache e validação de respostas
-- Storage: persistência de favoritos, preferências e cache com chaves versionadas
-- State orchestration: controle de fluxo de busca, seleção, carregamento, retries e telas de erro
+- Apresentação (`components`): busca, sugestões, favoritos, previsão, unidades,
+  loading, erro e regiões acessíveis; recebe dados e callbacks por props.
+- Orquestração (`hooks`): estado da aplicação, debounce, geolocalização,
+  persistência e ciclo de forecast; coordena efeitos sem decidir a aparência.
+- Acesso a dados (`services`): chamadas HTTP para geocoding e forecast,
+  integração com `navigator.geolocation`, `localStorage`, timeout, retry e
+  validação dos payloads externos.
+- Domínio funcional (`lib`): funções puras para normalização, conversão de
+  unidades, formatação de datas, mapeamento de códigos WMO, cache e seletores.
+- Contratos (`types`): tipos compartilhados entre componentes, hooks, serviços
+  e funções de domínio; não contém efeitos colaterais.
+- Composição (`App.tsx`): monta a tela, inicializa o hook principal e conecta
+  estado, ações e componentes; não implementa fetch nem regras de conversão.
+
+Regras de dependência:
+
+```text
+components -> hooks -> services
+components -> hooks -> lib
+components/hooks/services/lib -> types
+services -> lib (somente funções de validação/normalização necessárias)
+```
+
+`lib` não conhece React, navegador ou Open-Meteo. `services` não conhece a
+árvore de componentes. Assim, as regras puras podem ser testadas isoladamente
+e a UI permanece desacoplada do formato da API.
 
 ### Decisão de arquitetura
 - Usar React com composição de componentes e hooks reutilizáveis
@@ -58,41 +79,37 @@ flowchart LR
 ```text
 src/
   components/
-    SearchBar/
-    SearchSuggestions/
-    WeatherCard/
-    ForecastList/
-    FavoritesList/
-    UnitToggle/
-    LocationHeader/
-    ErrorState/
-    LoadingState/
+    SearchBar.tsx
+    SearchSuggestions.tsx
+    WeatherCard.tsx
+    ForecastList.tsx
+    FavoritesList.tsx
+    UnitToggle.tsx
+    LocationHeader.tsx
+    ErrorState.tsx
+    LoadingState.tsx
   hooks/
+    useWeather.ts
     useDebouncedSearch.ts
     useGeolocation.ts
     useLocalStorage.ts
-    useWeatherQuery.ts
   services/
     geocoding.ts
     forecast.ts
     geolocation.ts
-    weatherCodes.ts
     storage.ts
     validation.ts
   types/
-    location.ts
     weather.ts
+    location.ts
     preferences.ts
     favorites.ts
-  utils/
+  lib/
     date.ts
     units.ts
     normalize.ts
+    weather-code.ts
     cache.ts
-  state/
-    app-state.ts
-    reducer.ts
-    selectors.ts
   App.tsx
   main.tsx
   index.css
@@ -113,12 +130,16 @@ tasks/
 ```
 
 ### Responsabilidades por pasta
-- components: apresentação pura e acessível
-- hooks: lógica reutilizável de busca, geolocalização e persistência
-- services: contratos de API e validação externa
-- types: modelo de domínio do aplicativo
-- utils: normalização, conversões e manipulação de datas
-- state: máquina de estados e seleção de dados
+- components: apresentação pura, acessível e responsiva; sem chamadas de API
+  ou transformação de unidades.
+- hooks: estado e orquestração de ações; `useWeather` expõe o estado observável
+  e comandos para busca, seleção, atualização e favoritos.
+- services: fronteiras com Open-Meteo, geolocalização e armazenamento local;
+  convertem respostas externas para os contratos internos.
+- lib: funções puras e determinísticas de normalização, conversão, formatação,
+  mapeamento de condições e regras de cache.
+- types: contratos do domínio e tipos de estado usados por todas as camadas.
+- `App.tsx`: composição da aplicação e passagem explícita de props.
 
 ---
 
@@ -186,19 +207,26 @@ interface FavoriteItem {
 ```
 
 ### Estado observável
+O estado meteorológico exposto à árvore de componentes usa uma máquina de
+estados pequena e explícita:
+
 ```ts
-type AppState =
-  | 'INITIAL'
-  | 'SEARCHING'
-  | 'RESULTS'
-  | 'NO_RESULTS'
-  | 'LOCATING'
-  | 'WEATHER_LOADING'
-  | 'WEATHER'
-  | 'WEATHER_STALE'
-  | 'SEARCH_ERROR'
-  | 'WEATHER_ERROR';
+type WeatherStatus = 'idle' | 'loading' | 'success' | 'error' | 'empty';
+
+interface WeatherState {
+  status: WeatherStatus;
+  data: WeatherForecast | null;
+  error: WeatherError | null;
+  isRefreshing: boolean;
+}
 ```
+
+`empty` representa uma resposta válida sem previsão utilizável. `error`
+representa falha sem dados para exibir. Quando uma atualização falha depois de
+um forecast válido, `data` é preservado, `status` permanece `success` e
+`isRefreshing` volta a `false`; a UI apresenta o erro como aviso de dados
+anteriores. Busca, sugestões e geolocalização possuem estados operacionais
+próprios no hook, sem ampliar o contrato do painel meteorológico.
 
 ### Regras de domínio
 - `id` é a identidade primária para deduplicação de favoritos
@@ -220,7 +248,7 @@ type AppState =
 
 ### 2. Seleção da localidade
 - A localidade escolhida passa a ser a seleção atual
-- O estado muda para `WEATHER_LOADING`
+- O estado meteorológico muda para `loading`
 - A chamada de forecast é iniciada com latitude, longitude e timezone da cidade
 - O cache local é consultado antes de acelerar a renderização ou emitir erro
 
@@ -271,9 +299,13 @@ type AppState =
 
 ## State Management
 
-A abordagem será um estado local de aplicação centralizado, sem necessidade de biblioteca adicional como Redux, dado o escopo e a complexidade do MVP. A estrutura sugerida:
+A abordagem será um estado local centralizado no hook `useWeather`, montado no
+topo da árvore por `App`. Não será usada uma biblioteca adicional como Redux.
+Componentes filhos são apresentacionais: recebem estado derivado e callbacks
+por props e não acessam serviços, cache ou `localStorage` diretamente.
 
-- `App` consulta um reducer para transições de tela e dados principais
+- `useWeather` possui a localidade selecionada, forecast canônico, status,
+  erro, preferências, favoritos e comandos de busca/seleção/atualização
 - `useWeatherQuery` encapsula o ciclo de request, retry, timeout e atualização de cache
 - `useDebouncedSearch` centraliza a busca com debounce e cancelamento
 - `useLocalStorage` abstrai persistência com degradação graciosa
@@ -281,17 +313,49 @@ A abordagem será um estado local de aplicação centralizado, sem necessidade d
 
 ### Estrutura de estado
 ```ts
-interface AppViewState {
-  appState: AppState;
+interface UseWeatherState {
+  weather: WeatherState;
   selectedLocation: Location | null;
   searchQuery: string;
   suggestions: Location[];
-  currentForecast: WeatherForecast | null;
-  lastError: string | null;
+  searchStatus: 'idle' | 'loading' | 'success' | 'error' | 'empty';
+  lastSearchError: SearchError | null;
   favorites: Location[];
   preferences: Preferences;
 }
+
+interface UseWeatherActions {
+  search(query: string): void;
+  selectLocation(location: Location): void;
+  refresh(): void;
+  setTemperatureUnit(unit: 'C' | 'F'): void;
+  setSpeedUnit(unit: 'km/h' | 'mph'): void;
+}
 ```
+
+`App` chama `useWeather` uma vez e passa `weather`, `preferences`, favoritos e
+ações para `SearchBar`, `WeatherCard`, `ForecastList`, `UnitToggle` e demais
+componentes. Nenhum filho mantém uma cópia do forecast; isso evita divergência
+entre telas e torna as transições testáveis no hook.
+
+### Conversão de unidades
+O forecast armazenado e retornado pelos serviços permanece sempre em Celsius e
+km/h. A unidade escolhida é preferência de apresentação. Durante a
+renderização, seletores puros recebem `weather.data` e `preferences` e calculam
+os valores exibidos:
+
+```ts
+const displayTemperature = temperatureUnit === 'F'
+  ? celsius * 9 / 5 + 32
+  : celsius;
+const displayWindSpeed = speedUnit === 'mph'
+  ? kilometersPerHour / 1.609344
+  : kilometersPerHour;
+```
+
+Os valores são arredondados somente na formatação (`Math.round`). Alterar C/F
+ou km/h/mph atualiza a renderização imediatamente e não chama o serviço de
+forecast. Apenas `selectLocation` e `refresh` iniciam nova requisição.
 
 ### Vantagens
 - reduz acoplamento entre render e lógica de negócio
@@ -304,15 +368,17 @@ interface AppViewState {
 ## Error Handling Strategy
 
 ### Estados de UI
-- `INITIAL`: sem busca ativa ou localidade selecionada
-- `SEARCHING`: busca de geocoding em andamento
-- `RESULTS`: sugestões disponíveis
-- `NO_RESULTS`: ausência de matches
-- `LOCATING`: geolocalização inicial em andamento
-- `WEATHER_LOADING`: forecast em carregamento
-- `WEATHER`: dados válidos e atuais
-- `WEATHER_STALE`: dados anteriores preservados após falha
-- `SEARCH_ERROR` e `WEATHER_ERROR`: erros que interrompem ou exigem retry
+- `idle`: nenhuma localidade selecionada ou nenhuma operação meteorológica ativa
+- `loading`: forecast inicial ou atualização em andamento; dados anteriores podem
+  continuar visíveis quando `isRefreshing` for `true`
+- `success`: forecast válido disponível em unidades canônicas
+- `error`: forecast indisponível após as tentativas previstas, com ação de retry
+- `empty`: resposta válida sem dados meteorológicos utilizáveis
+
+O estado de busca usa o mesmo conjunto de valores, mas é independente do
+estado meteorológico. Assim, sugestões vazias não são confundidas com forecast
+vazio. Um erro durante refresh não apaga `weather.data`: o hook conserva o
+último sucesso e expõe a falha como aviso não bloqueante.
 
 ### Regras de retry e timeout
 - Geocoding e forecast: deadline total de 5s
@@ -333,40 +399,66 @@ interface AppViewState {
 
 ## Testing Strategy
 
-### Unitários (Vitest)
-Cobrir:
-- normalização de busca (trim, espaços duplicados, caracteres Unicode)
-- validação de geocoding e forecast
-- conversão de unidades (`C` -> `F`, `km/h` -> `mph`)
-- mapeamento de `weather_code`
-- timezone e data em fuso da localidade
-- deduplicação de favoritos por `location.id`
-- revalidação e expiração de cache
+### Vitest: funções puras
+Testar sem DOM, rede ou relógio real as regras determinísticas de `lib` e
+`services/validation`:
+- normalização e validação de busca, incluindo espaços, acentos e Unicode
+- parsing/normalização de geocoding e forecast, unidades e campos obrigatórios
+- conversão e arredondamento de Celsius/Fahrenheit e km/h/mph
+- mapeamento de códigos WMO e fallback `Condição indisponível`
+- cálculo de datas e horários no timezone da localidade
+- montagem dos sete dias, preenchimento de posições ausentes e dados parciais
+- deduplicação/limite de favoritos, validade do cache e expiração de 30 minutos
 
-### Integração
-Cobrir:
-- fluxo busca -> seleção -> forecast
-- geolocalização em caminho de sucesso e fallback
-- resposta parcial da API
-- concorrência e cancelamento de requests
-- persistência correta de favoritos e preferências
-- tratamento de `WEATHER_STALE` e `WEATHER_ERROR`
+Casos-limite devem ser testes de regressão: arrays de tamanhos diferentes,
+valores nulos, timezone divergente, cache futuro e temperaturas negativas.
 
-### E2E (Playwright)
-Cobrir:
-- busca por cidade, seleção e dados exibidos
-- atualização manual de dados
-- alternância de unidades
-- adicionar/remover favoritos
-- abrir favorito com cache e refresh
-- fluxo sem geolocalização
-- erro de forecast com fallback de dados antigos
-- acessibilidade básica via teclado e leitura de live region
+### Vitest: services com mock
+Testar os adaptadores de `services` com `fetch`, `navigator.geolocation`,
+`localStorage`, timers e `AbortController` controlados por mocks. Verificar:
+- URL, parâmetros codificados e método das chamadas Open-Meteo
+- conversão de respostas válidas e rejeição de payloads incompatíveis
+- timeout total de 5s/10s, retries apenas para falhas transitórias/5xx,
+  backoff e bloqueio global após 429
+- aborto de requests, descarte de respostas tardias e preservação do último dado
+- fallback quando geolocalização, `localStorage` ou uma resposta parcial falhar
+
+Os mocks devem ficar na fronteira externa; não mockar as funções de domínio
+que estão sendo testadas. Isso evita que um teste valide apenas o próprio mock.
+
+### Vitest + Testing Library: componentes e integração
+Testar componentes com props e callbacks reais, sem acessar APIs diretamente:
+- combobox: label, teclado, item ativo, seleção e fechamento das sugestões
+- loading, vazio, erro, stale data e regiões `aria-live`
+- exibição do forecast, fallback de campos, toggle de unidades e favorito
+- foco visível, nomes acessíveis e desabilitação correta de comandos
+
+No nível de integração, montar `App`/hooks com services mockados para cobrir
+busca -> seleção -> forecast, geolocalização, concorrência, cache, persistência
+e refresh. Esses testes validam a máquina de estados sem depender de servidores.
+
+### Playwright: fluxos E2E
+Usar um servidor de desenvolvimento/produção local e interceptar as chamadas
+Open-Meteo no navegador para tornar os cenários determinísticos. Cobrir os
+fluxos críticos completos:
+- abertura sem geolocalização, busca por cidade, seleção e forecast de sete dias
+- erro de busca, erro de forecast sem dados e falha de refresh com dados antigos
+- alternância de unidades sem nova chamada de forecast
+- adicionar/remover favoritos, reabrir favorito e revalidar cache
+- resposta parcial e comportamento responsivo dos sete dias
+- uso apenas por teclado, foco, nomes acessíveis e anúncios de `aria-live`
+
+Playwright não deve repetir todas as combinações numéricas ou de parsing já
+cobertas pelo Vitest. Sua responsabilidade é provar que as camadas integradas
+produzem um fluxo utilizável no navegador.
 
 ### Critério de qualidade
-- Todo requisito crítico da spec deve ter uma correspondência direta em testes
-- Cenários de edge case devem ter testes de regressão
-- TDD será usado para regras complexas de validação, cache e concorrência
+- Cada requisito crítico da spec deve apontar para pelo menos um teste Vitest,
+  de integração ou Playwright, conforme a camada que o controla.
+- Regras puras e contratos externos devem ter cobertura de casos felizes e
+  falhas; fluxos críticos devem ter pelo menos um cenário E2E.
+- TDD é recomendado para validação, cache, concorrência, retry e conversões.
+- A suíte deve ser executável sem depender da disponibilidade da Open-Meteo.
 
 ---
 
@@ -387,6 +479,41 @@ Cobrir:
 ### Risco 4: persistência local limitada
 - `localStorage` pode falhar ou estar cheio.
 - Mitigação: capturar erro e continuar funcionando sem persistência, com aviso não bloqueante.
+
+### Risco 5: testes instáveis por dependências externas
+- APIs públicas, geolocalização real e relógio do sistema podem tornar os testes
+  lentos ou não determinísticos.
+- Mitigação: mockar essas fronteiras no Vitest e interceptar Open-Meteo no
+  Playwright; controlar timers, deadlines e respostas fora de ordem.
+
+### Risco 6: cobertura E2E insuficiente ou excessiva
+- E2E não cobre bem todas as combinações de parsing e, se usado para tudo,
+  aumenta tempo de execução e custo de manutenção.
+- Mitigação: manter regras e contratos no Vitest, orquestração em integração e
+  reservar Playwright para fluxos críticos observáveis pelo usuário.
+
+### Risco 7: acessibilidade regressiva em componentes interativos
+- Combobox, foco e `aria-live` podem funcionar visualmente e falhar para teclado
+  ou leitor de tela.
+- Mitigação: assertions de roles/labels no Testing Library, cenários de teclado
+  no Playwright e verificação manual com NVDA conforme a spec.
+
+### Trade-offs técnicos
+- **Mocks vs. API real:** mocks tornam a suíte rápida e reproduzível, mas não
+  detectam sozinhos mudanças no contrato da Open-Meteo; manter validação de
+  payload e, opcionalmente, um smoke test separado contra a API.
+- **Testes de componente vs. E2E:** Testing Library oferece diagnóstico local e
+  feedback rápido; Playwright valida integração real, mas é mais lento e frágil.
+- **Cobertura ampla vs. tempo de CI:** priorizar caminhos críticos e casos de
+  regressão; não buscar cobertura percentual alta em código de composição trivial.
+- **Testar timeout/retry real vs. timers falsos:** timers controlados permitem
+  verificar deadlines sem esperar segundos, mas exigem cuidado para avançar o
+  relógio e liberar promises pendentes.
+- **Geolocalização real vs. simulada:** a simulação é reproduzível e cobre
+  permissões/timeout; não substitui a verificação manual entre navegadores.
+- **Validação estrita vs. tolerância parcial:** rejeitar estrutura, unidades ou
+  timezone incompatíveis protege o domínio; aceitar campos meteorológicos
+  opcionais preserva utilidade diante de respostas parciais.
 
 ### Trade-offs do MVP
 - Não haverá backend próprio, histórico de clima nem mapas interativos

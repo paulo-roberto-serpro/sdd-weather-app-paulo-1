@@ -113,6 +113,113 @@ Decisões-chave:
 
 ---
 
+## External APIs
+
+O app usa duas APIs da Open-Meteo, sem chave de autenticação.
+
+### Geocoding
+
+- URL: `https://geocoding-api.open-meteo.com/v1/search`
+- Método: `GET`
+- Objetivo: transformar o nome de uma cidade em coordenadas geográficas.
+
+Parâmetros principais:
+
+- `name`: nome da cidade ou localidade, por exemplo `São Paulo`
+- `count`: quantidade máxima de resultados, por exemplo `5`
+- `language`: idioma das respostas, por exemplo `pt`
+- `format`: formato da resposta, normalmente `json`
+- `countryCode`: filtro opcional por país, por exemplo `BR`
+
+Exemplo:
+
+```text
+https://geocoding-api.open-meteo.com/v1/search?name=S%C3%A3o%20Paulo&count=5&language=pt&format=json
+```
+
+Exemplo de resposta:
+
+```json
+{
+  "results": [
+    {
+      "id": 3448439,
+      "name": "São Paulo",
+      "latitude": -23.5489,
+      "longitude": -46.6388,
+      "country": "Brazil",
+      "country_code": "BR",
+      "admin1": "São Paulo",
+      "timezone": "America/Sao_Paulo"
+    }
+  ],
+  "generationtime_ms": 11.54
+}
+```
+
+### Forecast
+
+- URL: `https://api.open-meteo.com/v1/forecast`
+- Método: `GET`
+- Objetivo: buscar o clima atual e a previsão diária para uma latitude e longitude.
+
+Parâmetros principais:
+
+- `latitude`: latitude da localidade, por exemplo `-23.5489`
+- `longitude`: longitude da localidade, por exemplo `-46.6388`
+- `current`: campos do clima atual que devem ser retornados
+- `daily`: campos da previsão diária que devem ser retornados
+- `timezone`: normalmente `auto`, para respeitar o fuso local
+- `forecast_days`: quantidade de dias da previsão, por exemplo `7`
+- `temperature_unit`: unidade da temperatura, opcional (`celsius` ou `fahrenheit`)
+- `wind_speed_unit`: unidade da velocidade do vento, opcional (`kmh`, `mph`, etc.)
+
+Exemplo:
+
+```text
+https://api.open-meteo.com/v1/forecast?latitude=-23.5489&longitude=-46.6388&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=7
+```
+
+Exemplo de resposta:
+
+```json
+{
+  "latitude": -23.55,
+  "longitude": -46.64,
+  "generationtime_ms": 188.72,
+  "timezone": "America/Sao_Paulo",
+  "timezone_abbreviation": "-03",
+  "current": {
+    "time": "2026-08-12T15:00",
+    "temperature_2m": 28.1,
+    "relative_humidity_2m": 62,
+    "apparent_temperature": 30.2,
+    "weather_code": 1,
+    "wind_speed_10m": 9.4
+  },
+  "daily": {
+    "time": [
+      "2026-08-12",
+      "2026-08-13",
+      "2026-08-14"
+    ],
+    "weather_code": [1, 2, 3],
+    "temperature_2m_max": [29.4, 28.6, 27.9],
+    "temperature_2m_min": [20.5, 19.7, 18.9],
+    "precipitation_probability_max": [12, 18, 25]
+  }
+}
+```
+
+### Fluxo do app
+
+1. Usuário digita o nome da cidade.
+2. A API de geocoding resolve a cidade e retorna latitude/longitude.
+3. O app usa essas coordenadas na API de forecast.
+4. O frontend exibe o clima atual e a previsão diária conforme o timezone local.
+
+---
+
 ## Copilot no fluxo SDD
 
 A pasta `.github/` traz a inteligência do laboratório:
